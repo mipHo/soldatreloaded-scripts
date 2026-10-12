@@ -16,10 +16,14 @@
 -- as the default course takes the bravo flag home, max_grenades 0 (no grenades, nor their
 -- kits), respawn_time 0 (the next run at once), and only run maps in the rotation.
 -- vote_next.lua beside it lets the runners !vote.
+--
+-- What it keeps is in an SQLite database (runmode.db, by the server): each player's best
+-- on each map, every run finished, and the admins' courses. Records kept by an older
+-- runmode in runmode_records.json and runmode_courses.json are taken in at its first
+-- start, the files then renamed .imported.
 
 local options = {
-    records = "runmode_records.json", -- the file the best times are kept in, from the server's folder
-    courses = "runmode_courses.json", -- and the courses the admins made, by map
+    database = "runmode.db",          -- where the times and the courses are kept, from the server's folder
     radius = 30,                      -- how near a checkpoint a runner passes it, as the original's
     top = 10,                         -- the times !top shows
     kill_on_finish = true,            -- the runner killed at the finish, for the next run's respawn
@@ -38,56 +42,107 @@ local TICK_RATE = 60
 
 local course = {}   -- the checkpoints, {x, y} each: the start first, the finish last; none for no run map
 local runs = {}     -- slot -> {start = tick, next = the checkpoint ahead, x, y = where it was a tick ago}
-local records = {}  -- map -> hwid -> {name, ticks, date}
-local courses = {}  -- map -> the checkpoints its admins made, saved
+local store = nil   -- the database
 local shown = 0     -- the checkpoints shown in the world, on as many layers
 
 -- ---------------------------------------------------------------------------------
--- The records
+-- The records, by map in lower case, so a map asked for is found however it is written
 
--- A JSON file's table, or an empty one for a file not there or not JSON.
-local function load_json(path)
+local SCHEMA = [[
+CREATE TABLE IF NOT EXISTS times (    -- each player's best on each map
+    map TEXT NOT NULL, hwid TEXT NOT NULL, name TEXT NOT NULL,
+    ticks INTEGER NOT NULL, date INTEGER NOT NULL,
+    PRIMARY KEY (map, hwid));
+CREATE INDEX IF NOT EXISTS times_rank ON times (map, ticks, date);
+CREATE TABLE IF NOT EXISTS runs (     -- every run finished; hwid NULL for a game that sent none
+    id INTEGER PRIMARY KEY, map TEXT NOT NULL, hwid TEXT, name TEXT NOT NULL,
+    ticks INTEGER NOT NULL, date INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS runs_map ON runs (map, date);
+CREATE TABLE IF NOT EXISTS courses (  -- the admins' courses: each map's checkpoints, in order from 1
+    map TEXT NOT NULL, n INTEGER NOT NULL, x REAL NOT NULL, y REAL NOT NULL,
+    PRIMARY KEY (map, n));
+]]
+
+local function key(map)
+    return map:lower()
+end
+
+-- The time kept if it is the player's first on the map, or better than its best.
+local function keep_best(d, map, hwid, name, ticks, date)
+    d:exec([[INSERT INTO times VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (map, hwid) DO UPDATE SET name = excluded.name, ticks = excluded.ticks, date = excluded.date
+             WHERE excluded.ticks < times.ticks]], key(map), hwid, name, ticks, date)
+end
+
+local function best_of(map, hwid)
+    return store:first("SELECT name, ticks, date FROM times WHERE map = ? AND hwid = ?", key(map), hwid)
+end
+
+local function record_of(map)
+    return store:first("SELECT hwid, name, ticks FROM times WHERE map = ? ORDER BY ticks, date LIMIT 1", key(map))
+end
+
+-- The map's best `n` times, best first.
+local function top_of(map, n)
+    return store:query("SELECT name, ticks, date FROM times WHERE map = ? ORDER BY ticks, date LIMIT ?", key(map), n)
+end
+
+-- The player's place among the map's times: one more than those faster, or as fast
+-- and sooner.
+local function rank_of(map, hwid)
+    return store:first([[SELECT COUNT(*) + 1 AS rank FROM times t JOIN times me ON me.map = t.map AND me.hwid = ?
+                         WHERE t.map = ? AND (t.ticks < me.ticks OR (t.ticks = me.ticks AND t.date < me.date))]],
+        hwid, key(map)).rank
+end
+
+-- The checkpoints the admins saved for the map, or none.
+local function saved_course(map)
+    local course = {}
+    for _, cp in ipairs(store:query("SELECT x, y FROM courses WHERE map = ? ORDER BY n", key(map))) do
+        course[#course + 1] = {x = cp.x, y = cp.y}
+    end
+    return course
+end
+
+-- `course` the map's from now on; none, the map's own again.
+local function save_course(map, course)
+    store:transaction(function(d)
+        d:exec("DELETE FROM courses WHERE map = ?", key(map))
+        for i, cp in ipairs(course) do
+            d:exec("INSERT INTO courses VALUES (?, ?, ?, ?)", key(map), i, cp.x, cp.y)
+        end
+    end)
+end
+
+-- An older runmode's JSON file, taken in by `take` and renamed .imported, if it is there.
+local function import_json(path, take)
     local file = io.open(path, "r")
-    if not file then return {} end
+    if not file then return end
     local text = file:read("a")
     file:close()
     local ok, decoded = pcall(json.decode, text)
-    if ok and type(decoded) == "table" then return decoded end
-    server.print("runmode: " .. path .. " couldn't be read, and starts empty")
-    return {}
-end
-
--- Written whole, beside the file and then over it, so a crash leaves the old one.
-local function save_json(path, value)
-    local temp = path .. ".tmp"
-    local file, err = io.open(temp, "w")
-    if not file then
-        server.print("runmode: " .. path .. " couldn't be written: " .. tostring(err))
+    if not ok or type(decoded) ~= "table" then
+        server.print("runmode: " .. path .. " isn't JSON; left as it is")
         return
     end
-    file:write(json.encode(value))
-    file:close()
-    os.remove(path)
-    os.rename(temp, path)
+    store:transaction(function(d) take(d, decoded) end)
+    os.rename(path, path .. ".imported")
+    server.print("runmode: " .. path .. " taken into " .. options.database)
 end
 
--- The map's times, best first: {hwid, name, ticks, date} each.
-local function ranking(map)
-    local list = {}
-    for hwid, r in pairs(records[map] or {}) do
-        list[#list + 1] = {hwid = hwid, name = r.name, ticks = r.ticks, date = r.date}
-    end
-    table.sort(list, function(a, b)
-        if a.ticks ~= b.ticks then return a.ticks < b.ticks end
-        return a.date < b.date
+local function open_store()
+    store = assert(db.open(options.database))
+    store:exec(SCHEMA)
+    import_json("runmode_records.json", function(d, records)
+        for map, players in pairs(records) do
+            for hwid, r in pairs(players) do keep_best(d, map, hwid, r.name, r.ticks, r.date) end
+        end
     end)
-    return list
-end
-
-local function rank_of(list, hwid)
-    for i, r in ipairs(list) do
-        if r.hwid == hwid then return i end
-    end
+    import_json("runmode_courses.json", function(d, courses)
+        for map, checkpoints in pairs(courses) do
+            for i, cp in ipairs(checkpoints) do d:exec("INSERT OR REPLACE INTO courses VALUES (?, ?, ?, ?)", key(map), i, cp.x, cp.y) end
+        end
+    end)
 end
 
 -- ---------------------------------------------------------------------------------
@@ -123,12 +178,8 @@ end
 -- The map's course: the one its admins saved, else the alpha spawn, the bravo flag and
 -- the alpha flag. None for a map without the three, which isn't a run map.
 local function course_of_map()
-    local saved = courses[server.map():lower()]
-    if saved and #saved >= 2 then
-        local copy = {}
-        for i, cp in ipairs(saved) do copy[i] = {x = cp.x, y = cp.y} end
-        return copy
-    end
+    local saved = saved_course(server.map())
+    if #saved >= 2 then return saved end
     local spawns = server.spawns()
     local start, turn, finish = spawn_of(spawns, "alpha"), spawn_of(spawns, "bravo_flag"), spawn_of(spawns, "alpha_flag")
     if not (start and turn and finish) then return {} end
@@ -242,25 +293,22 @@ local function finish(slot, p, ticks)
     local map = server.map()
     show_finish(slot, ticks)
     if options.kill_on_finish then server.kill(slot) end
+    store:exec("INSERT INTO runs (map, hwid, name, ticks, date) VALUES (?, ?, ?, ?, ?)", key(map), p.hwid, p.name, ticks, os.time())
     if not p.hwid then
         server.say(("%s %s"):format(p.name, show_time(ticks)), rank_color(0))
         server.say_to(slot, "Your game sent no hardware ID: the time isn't kept")
         return
     end
 
-    local before = ranking(map)
-    local record = before[1]
-    local mine = records[map] and records[map][p.hwid]
+    local record = record_of(map)
+    local mine = best_of(map, p.hwid)
     if mine and ticks >= mine.ticks then
         server.say_to(slot, ("%s, %s slower than your best"):format(show_time(ticks), show_diff(ticks - mine.ticks)))
         return
     end
 
-    records[map] = records[map] or {}
-    records[map][p.hwid] = {name = p.name, ticks = ticks, date = os.time()}
-    save_json(options.records, records)
-
-    local rank = rank_of(ranking(map), p.hwid)
+    keep_best(store, map, p.hwid, p.name, ticks, os.time())
+    local rank = rank_of(map, p.hwid)
     local against = {}
     if mine then against[#against + 1] = "best " .. show_diff(ticks - mine.ticks) end
     if record and record.hwid ~= p.hwid then
@@ -337,14 +385,13 @@ end)
 -- The commands
 
 local function say_top(slot, map)
-    local list = ranking(map)
+    local list = top_of(map, options.top)
     if #list == 0 then
         server.say_to(slot, "No times on " .. map)
         return
     end
-    server.say_to(slot, ("%s, the best %d:"):format(map, math.min(#list, options.top)), "6495ED")
-    for i = 1, math.min(#list, options.top) do
-        local r = list[i]
+    server.say_to(slot, ("%s, the best %d:"):format(map, #list), "6495ED")
+    for i, r in ipairs(list) do
         server.say_to(slot, ("[%d] %s %s, %s"):format(i, r.name, show_time(r.ticks), os.date("%Y-%m-%d", r.date)), rank_color(i))
     end
 end
@@ -400,15 +447,11 @@ local course_commands = {
     end,
     cpsave = function(slot)
         if not runnable() then return tell(slot, "A course needs a start and a finish, two checkpoints at least") end
-        local saved = {}
-        for i, cp in ipairs(course) do saved[i] = {x = cp.x, y = cp.y} end
-        courses[server.map():lower()] = saved
-        save_json(options.courses, courses)
+        save_course(server.map(), course)
         tell(slot, ("The course of %d checkpoints is %s's now"):format(#course, server.map()))
     end,
     cpdefault = function(slot)
-        courses[server.map():lower()] = nil
-        save_json(options.courses, courses)
+        save_course(server.map(), {})
         course = course_of_map()
         course_told(slot, "The map's own course again")
     end,
@@ -440,9 +483,9 @@ server.on("chat", function(slot, text)
     elseif word == "best" then
         local p = server.player(slot)
         local map = server.map()
-        local mine = p.hwid and records[map] and records[map][p.hwid]
+        local mine = p.hwid and best_of(map, p.hwid)
         if mine then
-            local rank = rank_of(ranking(map), p.hwid)
+            local rank = rank_of(map, p.hwid)
             server.say_to(slot, ("Your best on %s: [%d] %s"):format(map, rank, show_time(mine.ticks)), rank_color(rank))
         else
             server.say_to(slot, "No time of yours on " .. map)
@@ -457,6 +500,5 @@ server.on("chat", function(slot, text)
     end
 end)
 
-records = load_json(options.records)
-courses = load_json(options.courses)
+open_store()
 set_course()
