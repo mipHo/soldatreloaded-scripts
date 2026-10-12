@@ -30,6 +30,7 @@ call that failed.
 | [`admin.lua`](admin.lua) | /hold, /go and /skip for the names given, for a game among friends |
 | [`round_webhook.lua`](round_webhook.lua) | each round's result printed and sent to a webhook (Discord's, or any JSON one) |
 | [`runmode.lua`](runmode.lua) | run mode: each player runs from the alpha spawn to the bravo flag and home to the alpha flag against the clock, the best time on each map kept by hardware ID; !top, !best, !help |
+| [`vote_next.lua`](vote_next.lua) | !vote: when more than half the players have said it, the round ends and a map at random from the server's list is next; !vote again takes it back |
 
 ## Writing a script
 
