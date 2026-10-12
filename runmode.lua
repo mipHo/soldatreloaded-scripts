@@ -5,7 +5,7 @@
 -- and timed from there to the finish; a run ends at a death, and the runner is killed at
 -- the finish, so the next run begins at the respawn. Everyone runs on alpha, where nobody
 -- hurts anybody else. The checkpoints are shown in the world, each runner's next one in
--- its own colour, for it alone.
+-- its own colour, for it alone, and each runner's time on its screen as it runs.
 --
 -- In the chat: !fail ends the run and starts another (bind it to a taunt), !top [map],
 -- !best and !help. An admin makes the map's course with /cpadd (a checkpoint where it
@@ -27,6 +27,11 @@ local options = {
     scale = 0.8,                      -- their size, of the big messages' lettering
     color = "FF4040",                 -- a checkpoint's colour
     next_color = "40FF40",            -- the runner's next one's
+    timer = {x = 320, y = 400, scale = 0.6, color = "FFFFFF", layer = 0,
+             finish_y = 365, finish_color = "FFD700", finish_layer = 1},
+                                      -- the runner's time on its screen (in the 640 by 480 view),
+                                      -- the last run's time above it a while, and the screen text
+                                      -- layers they are on; nil for none
 }
 
 local TICK_RATE = 60
@@ -172,12 +177,33 @@ local function mark_next(slot, run, marked)
     show_checkpoint(run.next, marked and options.next_color or options.color, slot)
 end
 
--- The run over: its next checkpoint as any other again, for a runner still on.
+-- The runner's time on its screen: counting from the run's start (its game counts it), or
+-- (none) taken away.
+local function show_timer(slot, start)
+    local t = options.timer
+    if not t then return end
+    if start then
+        server.screen_text_to(slot, t.layer, "", t.x, t.y, {clock = start, scale = t.scale, color = t.color})
+    else
+        server.screen_text_to(slot, t.layer, "")
+    end
+end
+
+-- A run's time, above the timer for a few seconds: the next run's begins below it at once.
+local function show_finish(slot, ticks)
+    local t = options.timer
+    if t then server.screen_text_to(slot, t.finish_layer, show_time(ticks), t.x, t.finish_y, {seconds = 3, scale = t.scale, color = t.finish_color}) end
+end
+
+-- The run over: its next checkpoint as any other again, and its timer gone, for a runner
+-- still on.
 local function end_run(slot)
     local run = runs[slot]
     if not run then return end
     runs[slot] = nil
-    if server.player(slot) then mark_next(slot, run, false) end
+    if not server.player(slot) then return end
+    mark_next(slot, run, false)
+    show_timer(slot)
 end
 
 -- Where the player in `slot` is placed: at the start, on a course that can be run.
@@ -214,6 +240,7 @@ end
 
 local function finish(slot, p, ticks)
     local map = server.map()
+    show_finish(slot, ticks)
     if options.kill_on_finish then server.kill(slot) end
     if not p.hwid then
         server.say(("%s %s"):format(p.name, show_time(ticks)), rank_color(0))
@@ -260,6 +287,7 @@ server.on("spawn", function(slot)
     local run = {start = server.tick(), next = 2, x = p.x, y = p.y}
     runs[slot] = run
     mark_next(slot, run, true)
+    show_timer(slot, run.start)
 end)
 
 server.on("tick", function(tick)
