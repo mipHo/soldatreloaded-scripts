@@ -14,7 +14,8 @@
 --
 -- For a run server: no bots, a long time_limit, a capture_limit far out of reach (9999),
 -- as the default course takes the bravo flag home, max_grenades 0 (no grenades, nor their
--- kits), respawn_time 0 (the next run at once), and only run maps in the rotation.
+-- kits), every gun off in guns (the fists alone, and no weapons menu in the way),
+-- respawn_time 0 (the next run at once), and only run maps in the rotation.
 -- vote_next.lua beside it lets the runners !vote.
 --
 -- What it keeps is in an SQLite database (runmode.db, by the server): each player's best
