@@ -3,8 +3,8 @@
 Lua scripts for [Soldat Reloaded](https://github.com/soldatreloaded/soldatreloaded-odin)
 servers: the examples that show the server's script API in use, and scripts of the
 community's own. A script greets players, answers chat commands, keeps the chat clean,
-runs a gather from the chat or reports each round to a webhook; it never changes how the
-game plays for the players who join.
+runs a gather from the chat, reports each round to a webhook, or turns the server into a
+run server against the clock.
 
 ## Installing a script
 
@@ -29,6 +29,7 @@ call that failed.
 | [`match_controls.lua`](match_controls.lua) | !pause, !up (a count of 3, 2, 1), !restart and !map <name>, for gathers |
 | [`admin.lua`](admin.lua) | /hold, /go and /skip for the names given, for a game among friends |
 | [`round_webhook.lua`](round_webhook.lua) | each round's result printed and sent to a webhook (Discord's, or any JSON one) |
+| [`runmode.lua`](runmode.lua) | run mode: each player runs from the alpha spawn to the bravo flag and home to the alpha flag against the clock, the best time on each map kept by hardware ID; !top, !best, !help |
 
 ## Writing a script
 
