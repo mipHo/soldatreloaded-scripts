@@ -3,16 +3,22 @@
 -- team's spawn to the bravo flag and back to the alpha flag, the run timed from the spawn
 -- to the alpha flag; a run ends at a death, and the runner is killed at the finish, so the
 -- next run begins at the respawn. Everyone runs on alpha, where nobody hurts anybody else.
--- !top [map], !best and !help in the chat.
+-- The checkpoints are shown in the world, each runner's next one in its own colour, for it
+-- alone. !top [map], !best and !help in the chat.
 --
 -- For a run server: no bots, a long time_limit, a capture_limit far out of reach (9999),
--- as the course takes the bravo flag home, and only run maps in the rotation.
+-- as the course takes the bravo flag home, max_grenades 0 (no grenades, nor their kits),
+-- and only run maps in the rotation. vote_next.lua beside it lets the runners !vote.
 
 local options = {
     records = "runmode_records.json", -- the file the best times are kept in, from the server's folder
     radius = 30,                      -- how near a checkpoint a runner passes it, as the original's
     top = 10,                         -- the times !top shows
     kill_on_finish = true,            -- the runner killed at the finish, for the next run's respawn
+    layer = 0,                        -- the first world text layer the checkpoints are shown on, one each
+    scale = 0.8,                      -- their size, of the big messages' lettering
+    color = "FF4040",                 -- a checkpoint's colour
+    next_color = "40FF40",            -- the runner's next one's
 }
 
 local TICK_RATE = 60
@@ -122,12 +128,45 @@ local function passes(cp, ax, ay, bx, by)
     return px * px + py * py <= options.radius * options.radius
 end
 
+-- What checkpoint `i` says: the start, the finish, or its number between them.
+local function label(i)
+    if i == 1 then return "Start" end
+    if i == #course then return "Finish" end
+    return tostring(i - 1)
+end
+
+-- Checkpoint `i` in the world, in `color`: to everyone, or to `slot` alone.
+local function show_checkpoint(i, color, slot)
+    local cp = course[i]
+    local style = {color = color, scale = options.scale}
+    if slot then
+        server.world_text_to(slot, options.layer + i - 1, label(i), cp.x, cp.y, style)
+    else
+        server.world_text(options.layer + i - 1, label(i), cp.x, cp.y, style)
+    end
+end
+
+-- The runner's next checkpoint shown as the next, or as any other again.
+local function mark_next(slot, run, marked)
+    if course[run.next] then show_checkpoint(run.next, marked and options.next_color or options.color, slot) end
+end
+
+-- The run over: its next checkpoint as any other again, for a runner still on.
+local function end_run(slot)
+    local run = runs[slot]
+    if not run then return end
+    runs[slot] = nil
+    if course and server.player(slot) then mark_next(slot, run, false) end
+end
+
 local function set_course()
     runs = {}
     course = course_of_map()
     if not course then
         server.print(("runmode: %s has no alpha spawn, bravo flag or alpha flag: no course"):format(server.map()))
+        return
     end
+    for i = 1, #course do show_checkpoint(i, options.color) end
 end
 
 -- ---------------------------------------------------------------------------------
@@ -168,12 +207,12 @@ end
 
 server.on("spawn", function(slot)
     local p = server.player(slot)
-    if not course or not p or p.team ~= "alpha" then
-        runs[slot] = nil
-        return
-    end
+    end_run(slot)
+    if not course or not p or p.team ~= "alpha" then return end
     -- the start is where the runner spawns: the alpha spawn, checkpoint 1
-    runs[slot] = {start = server.tick(), next = 2, x = p.x, y = p.y}
+    local run = {start = server.tick(), next = 2, x = p.x, y = p.y}
+    runs[slot] = run
+    mark_next(slot, run, true)
 end)
 
 server.on("tick", function(tick)
@@ -181,17 +220,19 @@ server.on("tick", function(tick)
     for slot, run in pairs(runs) do
         local p = server.player(slot)
         if not p or not p.alive then
-            runs[slot] = nil
+            end_run(slot)
         else
             local cp = course[run.next]
             if passes(cp, run.x, run.y, p.x, p.y) then
                 local ticks = tick - run.start
                 if run.next == #course then
-                    runs[slot] = nil
+                    end_run(slot)
                     finish(slot, p, ticks)
                 else
                     server.say_to(slot, ("Checkpoint %d/%d  %s"):format(run.next, #course, show_time(ticks)), "6495ED")
+                    mark_next(slot, run, false)
                     run.next = run.next + 1
+                    mark_next(slot, run, true)
                 end
             end
             run.x, run.y = p.x, p.y
@@ -199,7 +240,7 @@ server.on("tick", function(tick)
     end
 end)
 
-server.on("kill", function(killer, victim) runs[victim] = nil end)
+server.on("kill", function(killer, victim) end_run(victim) end)
 server.on("leave", function(slot) runs[slot] = nil end)
 server.on("round_end", function() runs = {} end)
 server.on("round_start", function() set_course() end)
